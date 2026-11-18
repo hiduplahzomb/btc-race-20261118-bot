@@ -38,6 +38,9 @@
 //     stopPct under the average entry; and a time exit at maxHoldBars (the
 //     recovery behind a deep dip can take hours to play out, so the clock
 //     is long — a 240-bar clock cut the dev window's second trade short).
+//     After a stop-loss exit the bot sits out cooldownBars bars before it
+//     may enter again: a stop means the bounce failed, so the next dip in
+//     the same flush is not bought straight away.
 //   - No entries in the last bars of the window: a trade opened there has no
 //     time to work before the forced flatten.
 //
@@ -66,6 +69,10 @@ export interface BounceHarvestParams {
   trailPct: number;
   /** Hard stop: sell when the position loses this much vs entry. */
   stopPct: number;
+  /** No entries for this many bars after a stop-loss exit (keeps the bot out
+      of a cascading selloff: a stop means the bounce failed, so the next dip
+      in the same flush is not bought straight away). */
+  cooldownBars: number;
   /** Time exit: sell after holding this many bars. */
   maxHoldBars: number;
   /** No entries at or after this bar index (0-based). */
@@ -83,6 +90,7 @@ export const DEFAULT_PARAMS: BounceHarvestParams = {
   trailArmPct: 0.008,
   trailPct: 0.005,
   stopPct: 0.015,
+  cooldownBars: 30,
   maxHoldBars: 400,
   lastEntryBar: 1380,
 };
@@ -122,6 +130,8 @@ export class BounceHarvest {
   private heldBars = 0;
   /** Whether we held a position on the last bar (to spot a fill). */
   private wasHolding = false;
+  /** Bar index of the last stop-loss exit, for the re-entry cooldown (-1: none yet). */
+  private lastStopBar = -1;
 
   constructor(params: BounceHarvestParams = DEFAULT_PARAMS) {
     this.params = params;
@@ -166,6 +176,9 @@ export class BounceHarvest {
       const peakPnl = this.peak / entry - 1;
       // Hard stop first: never let a trade bleed.
       if (pnl <= -p.stopPct) {
+        // Start the re-entry cooldown: the bounce failed, so the next dip
+        // in the same flush is not bought straight away.
+        this.lastStopBar = account.barIndex;
         return { action: 'sell', reason: 'stop' };
       }
       // Take-profit: the bounce is a fast spike; bank it at the target.
@@ -185,6 +198,10 @@ export class BounceHarvest {
 
     // --- flat: entries
     if (account.barIndex >= p.lastEntryBar) return { action: 'hold' };
+    // Re-entry cooldown after a stop-loss exit: sit out the rest of the flush.
+    if (this.lastStopBar >= 0 && account.barIndex - this.lastStopBar < p.cooldownBars) {
+      return { action: 'hold' };
+    }
     const retDip = this.retBars(p.dipBars);
     const retRegime = this.retBars(p.regimeBars);
     if (retDip === null || retRegime === null) return { action: 'hold' };
